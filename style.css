@@ -74,7 +74,7 @@ label {
 	padding: 0;
 }
 
-input {
+input, select {
 	width: 100%;
 	padding: 10px 10px;
 	border-radius: 10px;
@@ -84,7 +84,7 @@ input {
 	outline: none;
 }
 
-input:focus {
+input:focus, select:focus {
 	border-color: rgba(255, 255, 255, 0.25);
 }
 
@@ -215,4 +215,93 @@ tbody tr:last-child td { border-bottom: none; }
 	border-radius: 999px;
 	padding: 6px 10px;
 	font-weight: 800;
+}
+
+/* Select tweaks */
+select {
+	appearance: none;
+	-webkit-appearance: none;
+	-moz-appearance: none;
+	background-image:
+		linear-gradient(45deg, transparent 50%, rgba(255,255,255,0.55) 50%),
+		linear-gradient(135deg, rgba(255,255,255,0.55) 50%, transparent 50%);
+	background-position:
+		calc(100% - 18px) calc(50% - 2px),
+		calc(100% - 12px) calc(50% - 2px);
+	background-size: 6px 6px, 6px 6px;
+	background-repeat: no-repeat;
+	padding-right: 34px;
+}
+
+select:disabled {
+	opacity: 0.65;
+	cursor: not-allowed;
+}
+
+/* Jobs list */
+#jobsList {
+	display: grid;
+	gap: 10px;
+	margin-top: 12px;
+}
+
+.jobRow {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	padding: 10px 12px;
+	border: 1px solid var(--border);
+	border-radius: 12px;
+	background: rgba(255,255,255,0.03);
+}
+
+.jobRow .jobMeta {
+	display: grid;
+	gap: 4px;
+}
+
+.jobRow .jobName {
+	font-weight: 900;
+	color: var(--text);
+}
+
+.jobRow .jobDefaults {
+	color: var(--muted);
+	font-size: 0.9rem;
+}
+
+.jobRow .jobActions {
+	display: flex;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+
+/* Sync status bar */
+.syncBar {
+	margin-top: 10px;
+	height: 10px;
+	border-radius: 999px;
+	border: 1px solid var(--border);
+	background: rgba(255,255,255,0.04);
+	overflow: hidden;
+}
+
+.syncBarFill {
+	height: 100%;
+	width: 0%;
+	background: rgba(255,255,255,0.35);
+	transition: width 250ms ease;
+}
+
+.syncBar.syncing .syncBarFill {
+	width: 100%;
+	animation: syncPulse 1s ease-in-out infinite;
+}
+
+@keyframes syncPulse {
+	0% { opacity: 0.35; }
+	50% { opacity: 0.9; }
+	100% { opacity: 0.35; }
 }

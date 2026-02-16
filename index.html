@@ -55,13 +55,20 @@
 					</label>
 
 					<label>
+						Job
+						<select id="jobSelect" required>
+							<option value="" selected disabled>Choose a job…</option>
+						</select>
+					</label>
+
+					<label>
 						Hourly rate (£)
 						<input id="hourlyRate" type="number" step="0.01" min="0" placeholder="12.50" required>
 					</label>
 
 					<label class="span-2">
 						Notes (optional)
-						<input id="notes" type="text" placeholder="e.g. Prince of Wales, bar">
+						<input id="notes" type="text" placeholder="e.g. location, role, or notes">
 					</label>
 				</div>
 
@@ -117,6 +124,56 @@
 					<button id="clearBtn" type="button" class="secondary">Clear</button>
 				</div>
 			</form>
+		</section>
+
+		<!-- JOBS -->
+		<section class="card" id="jobsCard">
+			<h2>Jobs</h2>
+			<p class="muted small">Create job templates so you can quickly select a job when adding a shift.</p>
+
+			<form id="jobForm" autocomplete="off">
+				<div class="grid">
+					<label>
+						Job name
+						<input id="jobName" type="text" placeholder="e.g. Job A" required>
+					</label>
+
+					<label>
+						Default hourly rate (£)
+						<input id="jobRate" type="number" step="0.01" min="0" placeholder="12.50">
+					</label>
+
+					<label>
+						Default break (mins)
+						<input id="jobBreakMins" type="number" step="1" min="0" value="0">
+					</label>
+
+					<label class="check">
+						<input id="jobPaidBreak" type="checkbox">
+						Paid breaks by default
+					</label>
+				</div>
+
+				<p id="jobError" class="error" aria-live="polite"></p>
+
+				<div class="actions">
+					<button id="addJobBtn" type="submit">Add job</button>
+					<button id="cancelJobEditBtn" type="button" class="secondary" hidden>Cancel edit</button>
+				</div>
+			</form>
+
+			<hr>
+
+			<div class="actions" style="justify-content: space-between; align-items: center;">
+				<label style="max-width: 320px; width: 100%;">
+					Filter shifts by job
+					<select id="jobFilter">
+						<option value="all" selected>All jobs</option>
+					</select>
+				</label>
+			</div>
+
+			<div id="jobsList" class="muted small"></div>
 		</section>
 
 		<!-- SHIFTS TABLE -->
