@@ -1,12 +1,23 @@
-/* Pay Tracker (LocalStorage, Stage 2)
+/* Pay Tracker (LocalStorage + Supabase, Stage 3)
    - Add / edit / delete shifts
    - Scheduled vs actual hours + pay
    - Weekly summary (Mon–Sun)
    - Payment date = Friday of following week (weekEnd Sunday + 5 days)
    - Export/Import JSON
+   - Cloud sync (Supabase) when signed in; LocalStorage when signed out
 */
 
 const LS_KEY = "paytracker_shifts_v1";
+
+// --------- Supabase (cloud sync) ----------
+const SUPABASE_URL = "https://ephskckdgmisocwjzond.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_LcauD3kUOZiQcJoTVfUK6A_aZwDs89q";
+
+const supabase = window.supabase?.createClient
+	? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+	: null;
+
+let useCloud = false;
 
 let shifts = [];
 let editingId = null;
@@ -25,6 +36,7 @@ const schedBreakEl = document.getElementById("schedBreak");
 const actStartEl = document.getElementById("actStart");
 const actEndEl = document.getElementById("actEnd");
 const actBreakEl = document.getElementById("actBreak");
+const paidBreakEl = document.getElementById("paidBreak");
 
 const formErrorEl = document.getElementById("formError");
 
@@ -38,6 +50,14 @@ const weeksWrap = document.getElementById("weeksWrap");
 
 const exportBtn = document.getElementById("exportBtn");
 const importInput = document.getElementById("importInput");
+
+// Auth UI (Account card)
+const emailEl = document.getElementById("email");
+const passwordEl = document.getElementById("password");
+const signUpBtn = document.getElementById("signUpBtn");
+const signInBtn = document.getElementById("signInBtn");
+const signOutBtn = document.getElementById("signOutBtn");
+const authMsgEl = document.getElementById("authMsg");
 
 // --------- Utils ----------
 function safeNumber(v, fallback = 0) {
@@ -81,7 +101,7 @@ function timeToMins(t) {
 	return hh * 60 + mm;
 }
 
-function minsWorked(startTime, endTime, breakMins) {
+function minsWorked(startTime, endTime, breakMins, paidBreak) {
 	const s = timeToMins(startTime);
 	const e = timeToMins(endTime);
 	if (s == null || e == null) return null;
@@ -89,7 +109,9 @@ function minsWorked(startTime, endTime, breakMins) {
 	let dur = e - s;
 	if (dur < 0) dur += 24 * 60; // overnight shift
 
-	dur -= safeNumber(breakMins, 0);
+	if (!paidBreak) {
+		dur -= safeNumber(breakMins, 0);
+	}
 	return dur;
 }
 
@@ -122,7 +144,7 @@ function isCompleted(shift) {
 	return !!(a && a.start && a.end);
 }
 
-// --------- Storage ----------
+// --------- Storage (Local) ----------
 function loadLocal() {
 	try {
 		const raw = localStorage.getItem(LS_KEY);
@@ -136,6 +158,118 @@ function loadLocal() {
 
 function saveLocal() {
 	localStorage.setItem(LS_KEY, JSON.stringify(shifts));
+}
+
+// --------- Cloud storage helpers ----------
+function setAuthMsg(msg) {
+	if (authMsgEl) authMsgEl.textContent = msg || "";
+}
+
+function rowToShift(r) {
+	return {
+		id: r.id,
+		createdAt: new Date(r.created_at).getTime(),
+		dateWorked: r.date_worked,
+		rate: Number(r.rate),
+		notes: r.notes ?? "",
+		paidBreak: !!r.paid_break,
+		sched: {
+			start: r.sched_start,
+			end: r.sched_end,
+			breakMins: r.sched_break_mins
+		},
+		actual: {
+			start: r.act_start ?? "",
+			end: r.act_end ?? "",
+			breakMins: r.act_break_mins ?? 0
+		}
+	};
+}
+
+function shiftToRow(shift, userId) {
+	return {
+		id: shift.id,
+		user_id: userId,
+		date_worked: shift.dateWorked,
+		rate: shift.rate,
+		notes: shift.notes,
+		paid_break: !!shift.paidBreak,
+		sched_start: shift.sched.start,
+		sched_end: shift.sched.end,
+		sched_break_mins: shift.sched.breakMins,
+		act_start: shift.actual?.start || null,
+		act_end: shift.actual?.end || null,
+		act_break_mins: shift.actual?.breakMins ?? 0
+	};
+}
+
+async function cloudLoadShifts() {
+	const { data, error } = await supabase
+		.from("shifts")
+		.select("*")
+		.order("date_worked", { ascending: false })
+		.order("created_at", { ascending: false });
+
+	if (error) throw error;
+	return (data ?? []).map(rowToShift);
+}
+
+async function cloudInsertShift(shift) {
+	const { data: u, error: uErr } = await supabase.auth.getUser();
+	if (uErr) throw uErr;
+	if (!u?.user) throw new Error("Not signed in.");
+
+	const { error } = await supabase.from("shifts").insert(shiftToRow(shift, u.user.id));
+	if (error) throw error;
+}
+
+async function cloudUpdateShift(shift) {
+	const patch = {
+		date_worked: shift.dateWorked,
+		rate: shift.rate,
+		notes: shift.notes,
+		paid_break: !!shift.paidBreak,
+		sched_start: shift.sched.start,
+		sched_end: shift.sched.end,
+		sched_break_mins: shift.sched.breakMins,
+		act_start: shift.actual?.start || null,
+		act_end: shift.actual?.end || null,
+		act_break_mins: shift.actual?.breakMins ?? 0
+	};
+
+	const { error } = await supabase.from("shifts").update(patch).eq("id", shift.id);
+	if (error) throw error;
+}
+
+async function cloudDeleteShift(id) {
+	const { error } = await supabase.from("shifts").delete().eq("id", id);
+	if (error) throw error;
+}
+
+async function refreshAuthState() {
+	if (!supabase) {
+		useCloud = false;
+		setAuthMsg("Supabase not loaded — using local storage.");
+		shifts = loadLocal();
+		render();
+		return;
+	}
+
+	const { data } = await supabase.auth.getSession();
+	const signedIn = !!data.session;
+
+	useCloud = signedIn;
+	if (signOutBtn) signOutBtn.hidden = !signedIn;
+
+	if (signedIn) {
+		setAuthMsg("Signed in — using cloud sync.");
+		shifts = await cloudLoadShifts();
+	} else {
+		setAuthMsg("Not signed in — using local storage.");
+		shifts = loadLocal();
+	}
+
+	render();
 }
 
 // --------- Validation ----------
@@ -155,12 +289,12 @@ function validateShiftInput(input) {
 	if (safeNumber(input.actBreakMins ?? 0, 0) < 0) errors.push("Actual break can’t be negative.");
 
 	// sanity check: scheduled minutes after break > 0
-	const schedMins = minsWorked(input.schedStart, input.schedEnd, input.schedBreakMins);
+	const schedMins = minsWorked(input.schedStart, input.schedEnd, input.schedBreakMins, input.paidBreak);
 	if (schedMins != null && schedMins <= 0) errors.push("Scheduled hours look invalid (break may be too long).");
 
 	// sanity check: actual minutes after break > 0 (only if provided)
 	if (hasActualStart && hasActualEnd) {
-		const actMins = minsWorked(input.actStart, input.actEnd, input.actBreakMins ?? 0);
+		const actMins = minsWorked(input.actStart, input.actEnd, input.actBreakMins ?? 0, input.paidBreak);
 		if (actMins != null && actMins <= 0) errors.push("Actual hours look invalid (break may be too long).");
 	}
 
@@ -171,7 +305,7 @@ function validateShiftInput(input) {
 function calcForShift(shift) {
 	const rate = safeNumber(shift.rate, 0);
 
-	const schedMins = minsWorked(shift.sched.start, shift.sched.end, shift.sched.breakMins);
+	const schedMins = minsWorked(shift.sched.start, shift.sched.end, shift.sched.breakMins, shift.paidBreak);
 	const schedHours = schedMins == null ? 0 : minsToHours(schedMins);
 	const schedPay = schedHours * rate;
 
@@ -179,7 +313,7 @@ function calcForShift(shift) {
 	let actPay = 0;
 
 	if (shift.actual && shift.actual.start && shift.actual.end) {
-		const actMins = minsWorked(shift.actual.start, shift.actual.end, shift.actual.breakMins ?? 0);
+		const actMins = minsWorked(shift.actual.start, shift.actual.end, shift.actual.breakMins ?? 0, shift.paidBreak);
 		actHours = actMins == null ? 0 : minsToHours(actMins);
 		actPay = actHours * rate;
 	}
@@ -191,12 +325,6 @@ function calcForShift(shift) {
 		actPay,
 		diffPay: actPay - schedPay
 	};
-}
-
-function getWeekIdForDateStr(dateStr) {
-	const d = parseISODate(dateStr);
-	const ws = getWeekStart(d);
-	return dateKey(ws);
 }
 
 function buildWeeklySummaries(shiftsArr) {
@@ -239,7 +367,6 @@ function buildWeeklySummaries(shiftsArr) {
 
 // --------- Rendering ----------
 function render() {
-	// sort shifts by date descending, then creation time if you add it later
 	const sorted = shifts.slice().sort((a, b) => {
 		if (a.dateWorked === b.dateWorked) return (b.createdAt ?? 0) - (a.createdAt ?? 0);
 		return b.dateWorked.localeCompare(a.dateWorked);
@@ -273,20 +400,21 @@ function renderShiftsTable(sorted) {
 		schedP.textContent = fmtMoney(c.schedPay);
 
 		const actH = document.createElement("td");
-        const actP = document.createElement("td");
-        const diffP = document.createElement("td");
+		const actP = document.createElement("td");
+		const diffP = document.createElement("td");
 
-        if (isCompleted(s)) {
-            actH.textContent = fmtHours(c.actHours);
-            actP.textContent = fmtMoney(c.actPay);
-            diffP.textContent = fmtMoney(c.diffPay);
-        } else {
-            actH.textContent = "N/A";
-            actP.textContent = "N/A";
-            diffP.textContent = "N/A";
-        }
+		if (isCompleted(s)) {
+			actH.textContent = fmtHours(c.actHours);
+			actP.textContent = fmtMoney(c.actPay);
+			diffP.textContent = fmtMoney(c.diffPay);
+		} else {
+			actH.textContent = "N/A";
+			actP.textContent = "N/A";
+			diffP.textContent = "N/A";
+		}
 
 		const actionsTd = document.createElement("td");
+
 		const editBtn = document.createElement("button");
 		editBtn.type = "button";
 		editBtn.className = "secondary";
@@ -396,6 +524,7 @@ function getFormInput() {
 		dateWorked: dateWorkedEl.value,
 		rate: safeNumber(hourlyRateEl.value, NaN),
 		notes: (notesEl.value || "").trim(),
+		paidBreak: !!paidBreakEl?.checked,
 
 		schedStart: schedStartEl.value,
 		schedEnd: schedEndEl.value,
@@ -417,9 +546,9 @@ function setError(msg) {
 
 function resetForm() {
 	form.reset();
-	// keep nice defaults
 	schedBreakEl.value = "0";
 	actBreakEl.value = "0";
+	if (paidBreakEl) paidBreakEl.checked = false;
 	editingId = null;
 	submitBtn.textContent = "Add shift";
 	cancelEditBtn.hidden = true;
@@ -430,6 +559,7 @@ function fillFormFromShift(shift) {
 	dateWorkedEl.value = shift.dateWorked;
 	hourlyRateEl.value = shift.rate;
 	notesEl.value = shift.notes ?? "";
+	if (paidBreakEl) paidBreakEl.checked = !!shift.paidBreak;
 
 	schedStartEl.value = shift.sched.start;
 	schedEndEl.value = shift.sched.end;
@@ -441,13 +571,14 @@ function fillFormFromShift(shift) {
 }
 
 // --------- Actions ----------
-function addShiftFromInput(input) {
+async function addShiftFromInput(input) {
 	const shift = {
 		id: crypto.randomUUID(),
 		createdAt: Date.now(),
 		dateWorked: input.dateWorked,
 		rate: input.rate,
 		notes: input.notes,
+		paidBreak: !!input.paidBreak,
 		sched: {
 			start: input.schedStart,
 			end: input.schedEnd,
@@ -465,12 +596,24 @@ function addShiftFromInput(input) {
 	};
 
 	shifts.push(shift);
-	saveLocal();
-	render();
-	resetForm();
+
+	try {
+		if (useCloud) {
+			await cloudInsertShift(shift);
+			shifts = await cloudLoadShifts();
+		} else {
+			saveLocal();
+		}
+		render();
+		resetForm();
+	} catch (e) {
+		setError(e?.message ?? "Save failed.");
+		if (!useCloud) saveLocal();
+		render();
+	}
 }
 
-function updateShiftFromInput(id, input) {
+async function updateShiftFromInput(id, input) {
 	const idx = shifts.findIndex(s => s.id === id);
 	if (idx === -1) return;
 
@@ -479,6 +622,7 @@ function updateShiftFromInput(id, input) {
 		dateWorked: input.dateWorked,
 		rate: input.rate,
 		notes: input.notes,
+		paidBreak: !!input.paidBreak,
 		sched: {
 			start: input.schedStart,
 			end: input.schedEnd,
@@ -496,9 +640,21 @@ function updateShiftFromInput(id, input) {
 	};
 
 	shifts[idx] = updated;
-	saveLocal();
-	render();
-	resetForm();
+
+	try {
+		if (useCloud) {
+			await cloudUpdateShift(updated);
+			shifts = await cloudLoadShifts();
+		} else {
+			saveLocal();
+		}
+		render();
+		resetForm();
+	} catch (e) {
+		setError(e?.message ?? "Update failed.");
+		if (!useCloud) saveLocal();
+		render();
+	}
 }
 
 function startEdit(id) {
@@ -511,11 +667,10 @@ function startEdit(id) {
 	cancelEditBtn.hidden = false;
 	clearError();
 
-	// scroll form into view for convenience
-	form.scrollIntoView({ behaviour: "smooth", block: "start" });
+	form.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
-function onDelete(id) {
+async function onDelete(id) {
 	const s = shifts.find(x => x.id === id);
 	if (!s) return;
 
@@ -523,8 +678,20 @@ function onDelete(id) {
 	if (!ok) return;
 
 	shifts = shifts.filter(x => x.id !== id);
-	saveLocal();
-	render();
+
+	try {
+		if (useCloud) {
+			await cloudDeleteShift(id);
+			shifts = await cloudLoadShifts();
+		} else {
+			saveLocal();
+		}
+		render();
+	} catch (e) {
+		setError(e?.message ?? "Delete failed.");
+		if (!useCloud) saveLocal();
+		render();
+	}
 
 	if (editingId === id) resetForm();
 }
@@ -548,7 +715,10 @@ function exportJSON() {
 		exportedAt: new Date().toISOString(),
 		shifts
 	};
-	downloadText(`paytracker_export_${new Date().toISOString().slice(0,10)}.json`, JSON.stringify(payload, null, 2));
+	downloadText(
+		`paytracker_export_${new Date().toISOString().slice(0, 10)}.json`,
+		JSON.stringify(payload, null, 2)
+	);
 }
 
 async function importJSONFile(file) {
@@ -558,7 +728,6 @@ async function importJSONFile(file) {
 	const incoming = Array.isArray(parsed) ? parsed : parsed.shifts;
 	if (!Array.isArray(incoming)) throw new Error("Invalid JSON format.");
 
-	// basic sanity filtering
 	const cleaned = incoming
 		.filter(s => s && typeof s === "object" && typeof s.id === "string" && typeof s.dateWorked === "string")
 		.map(s => ({
@@ -567,6 +736,7 @@ async function importJSONFile(file) {
 			dateWorked: s.dateWorked,
 			rate: safeNumber(s.rate, 0),
 			notes: s.notes ?? "",
+			paidBreak: !!s.paidBreak,
 			sched: {
 				start: s.sched?.start ?? "",
 				end: s.sched?.end ?? "",
@@ -579,7 +749,6 @@ async function importJSONFile(file) {
 			}
 		}));
 
-	// Replace (simplest). You can change to merge later.
 	shifts = cleaned;
 	saveLocal();
 	render();
@@ -587,7 +756,7 @@ async function importJSONFile(file) {
 }
 
 // --------- Events ----------
-form.addEventListener("submit", (e) => {
+form.addEventListener("submit", async (e) => {
 	e.preventDefault();
 	clearError();
 
@@ -598,8 +767,8 @@ form.addEventListener("submit", (e) => {
 		return;
 	}
 
-	if (editingId == null) addShiftFromInput(input);
-	else updateShiftFromInput(editingId, input);
+	if (editingId == null) await addShiftFromInput(input);
+	else await updateShiftFromInput(editingId, input);
 });
 
 cancelEditBtn.addEventListener("click", () => resetForm());
@@ -627,9 +796,63 @@ importInput.addEventListener("change", async (e) => {
 	}
 });
 
+// --------- Auth events ----------
+if (signUpBtn && signInBtn && signOutBtn) {
+	signUpBtn.addEventListener("click", async () => {
+		clearError();
+		setAuthMsg("Signing up…");
+
+		const email = (emailEl?.value || "").trim();
+		const password = passwordEl?.value || "";
+
+		if (!email || !password) {
+			setAuthMsg("Enter an email and password.");
+			return;
+		}
+		if (!supabase) {
+			setAuthMsg("Supabase not loaded.");
+			return;
+		}
+
+		const { error } = await supabase.auth.signUp({ email, password });
+		setAuthMsg(error ? error.message : "Account created. Now sign in.");
+	});
+
+	signInBtn.addEventListener("click", async () => {
+		clearError();
+		setAuthMsg("Signing in…");
+
+		const email = (emailEl?.value || "").trim();
+		const password = passwordEl?.value || "";
+
+		if (!email || !password) {
+			setAuthMsg("Enter an email and password.");
+			return;
+		}
+		if (!supabase) {
+			setAuthMsg("Supabase not loaded.");
+			return;
+		}
+
+		const { error } = await supabase.auth.signInWithPassword({ email, password });
+		if (error) {
+			setAuthMsg(error.message);
+			return;
+		}
+
+		await refreshAuthState();
+	});
+
+	signOutBtn.addEventListener("click", async () => {
+		clearError();
+		if (!supabase) return;
+		await supabase.auth.signOut();
+		await refreshAuthState();
+	});
+}
+
 // --------- Init ----------
-function init() {
-	shifts = loadLocal();
-	render();
+async function init() {
+	await refreshAuthState();
 }
 init();

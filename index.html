@@ -14,6 +14,30 @@
 	</header>
 
 	<main class="container">
+		<!-- ACCOUNT -->
+		<section class="card" id="accountCard">
+			<h2>Account</h2>
+
+			<div class="grid">
+				<label>
+					Email
+					<input id="email" type="email" placeholder="you@example.com" autocomplete="email">
+				</label>
+
+				<label>
+					Password
+					<input id="password" type="password" placeholder="••••••••" autocomplete="current-password">
+				</label>
+			</div>
+
+			<div class="actions">
+				<button id="signUpBtn" type="button">Sign up</button>
+				<button id="signInBtn" type="button">Sign in</button>
+				<button id="signOutBtn" type="button" class="secondary" hidden>Sign out</button>
+			</div>
+
+			<p id="authMsg" class="muted small" aria-live="polite"></p>
+		</section>
 		<!-- FORM -->
 		<section class="card">
 			<h2>Add / Edit shift</h2>
@@ -135,7 +159,7 @@
 	<footer class="container muted small">
 		<p>Data is stored locally in your browser unless you later enable cloud sync.</p>
 	</footer>
-
-	<script src="app.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="app.js"></script>
 </body>
 </html>
