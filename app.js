@@ -25,8 +25,14 @@ const SYNC_INTERVAL_MS = 10000; // every 10s
 let syncTimerId = null;
 let syncInFlight = false;
 
+
 let shifts = [];
 let editingId = null;
+
+// --------- Jobs (templates) ----------
+// NOTE: No job names are hardcoded anywhere. Jobs are user-defined.
+let jobs = [];            // loaded from Supabase in future stages
+let selectedJobId = null; // will be driven by UI in future stages
 
 // --------- DOM ----------
 const form = document.getElementById("shiftForm");
@@ -207,6 +213,7 @@ function rowToShift(r) {
 	return {
 		id: r.id,
 		createdAt: new Date(r.created_at).getTime(),
+		jobId: r.job_id ?? null,
 		dateWorked: r.date_worked,
 		rate: Number(r.rate),
 		notes: r.notes ?? "",
@@ -228,6 +235,7 @@ function shiftToRow(shift, userId) {
 	return {
 		id: shift.id,
 		user_id: userId,
+		job_id: shift.jobId ?? null,
 		date_worked: shift.dateWorked,
 		rate: shift.rate,
 		notes: shift.notes,
@@ -263,6 +271,7 @@ async function cloudInsertShift(shift) {
 
 async function cloudUpdateShift(shift) {
 	const patch = {
+		job_id: shift.jobId ?? null,
 		date_worked: shift.dateWorked,
 		rate: shift.rate,
 		notes: shift.notes,
@@ -288,6 +297,7 @@ async function cloudDeleteShift(id) {
 function shiftComparableObject(s) {
 	return {
 		id: s.id,
+		jobId: s.jobId ?? null,
 		dateWorked: s.dateWorked,
 		rate: Number(s.rate),
 		notes: s.notes ?? "",
@@ -717,6 +727,7 @@ async function addShiftFromInput(input) {
 	const shift = {
 		id: crypto.randomUUID(),
 		createdAt: Date.now(),
+		jobId: selectedJobId,
 		dateWorked: input.dateWorked,
 		rate: input.rate,
 		notes: input.notes,
@@ -875,6 +886,7 @@ async function importJSONFile(file) {
 		.map(s => ({
 			id: s.id,
 			createdAt: s.createdAt ?? Date.now(),
+			jobId: s.jobId ?? null,
 			dateWorked: s.dateWorked,
 			rate: safeNumber(s.rate, 0),
 			notes: s.notes ?? "",
