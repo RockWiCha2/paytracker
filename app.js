@@ -1,13 +1,15 @@
-/* Pay Tracker (LocalStorage + Supabase, Stage 3)
+/* Pay Tracker (LocalStorage + Supabase, Stage 3+Jobs)
    - Add / edit / delete shifts
    - Scheduled vs actual hours + pay
    - Weekly summary (Mon–Sun)
    - Payment date = Friday of following week (weekEnd Sunday + 5 days)
    - Export/Import JSON
    - Cloud sync (Supabase) when signed in; LocalStorage when signed out
+   - Jobs (templates): create/edit/delete jobs, select job per shift, filter by job
 */
 
 const LS_KEY = "paytracker_shifts_v1";
+const LS_JOBS_KEY = "paytracker_jobs_v1";
 
 // --------- Supabase (cloud sync) ----------
 const SUPABASE_URL = "https://ephskckdgmisocwjzond.supabase.co";
@@ -17,7 +19,6 @@ const supabaseClient = window.supabase?.createClient
 	? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
 	: null;
 
-
 let useCloud = false;
 
 // --------- Sync settings ----------
@@ -25,19 +26,20 @@ const SYNC_INTERVAL_MS = 10000; // every 10s
 let syncTimerId = null;
 let syncInFlight = false;
 
-
 let shifts = [];
 let editingId = null;
 
 // --------- Jobs (templates) ----------
-// NOTE: No job names are hardcoded anywhere. Jobs are user-defined.
-let jobs = [];            // loaded from Supabase in future stages
-let selectedJobId = null; // will be driven by UI in future stages
+let jobs = [];
+let selectedJobId = null;
+let jobFilterId = "all";
+let editingJobId = null;
 
 // --------- DOM ----------
 const form = document.getElementById("shiftForm");
 
 const dateWorkedEl = document.getElementById("dateWorked");
+const jobSelectEl = document.getElementById("jobSelect");
 const hourlyRateEl = document.getElementById("hourlyRate");
 const notesEl = document.getElementById("notes");
 
@@ -75,6 +77,20 @@ const syncStatusEl = document.getElementById("syncStatus");
 const syncBarEl = document.getElementById("syncBar");
 const syncBarFillEl = document.getElementById("syncBarFill");
 
+// Jobs UI
+const jobFilterEl = document.getElementById("jobFilter");
+const jobsListEl = document.getElementById("jobsList");
+
+const jobFormEl = document.getElementById("jobForm");
+const jobNameEl = document.getElementById("jobName");
+const jobRateEl = document.getElementById("jobRate");
+const jobBreakMinsEl = document.getElementById("jobBreakMins");
+const jobPaidBreakEl = document.getElementById("jobPaidBreak");
+const jobErrorEl = document.getElementById("jobError");
+
+const cancelJobEditBtn = document.getElementById("cancelJobEditBtn");
+const addJobBtn = document.getElementById("addJobBtn");
+
 // --------- Utils ----------
 function safeNumber(v, fallback = 0) {
 	const n = Number(v);
@@ -95,13 +111,11 @@ function fmtHours(n) {
 }
 
 function parseISODate(dateStr) {
-	// dateStr "YYYY-MM-DD" -> Date at midnight local
 	const [y, m, d] = dateStr.split("-").map(Number);
 	return new Date(y, m - 1, d);
 }
 
 function fmtDateLong(d) {
-	// e.g. Mon 16 Feb 2026
 	return d.toLocaleDateString("en-GB", {
 		weekday: "short",
 		day: "2-digit",
@@ -111,7 +125,6 @@ function fmtDateLong(d) {
 }
 
 function timeToMins(t) {
-	// "HH:MM" -> minutes since midnight
 	if (!t || !/^\d{2}:\d{2}$/.test(t)) return null;
 	const [hh, mm] = t.split(":").map(Number);
 	return hh * 60 + mm;
@@ -123,11 +136,9 @@ function minsWorked(startTime, endTime, breakMins, paidBreak) {
 	if (s == null || e == null) return null;
 
 	let dur = e - s;
-	if (dur < 0) dur += 24 * 60; // overnight shift
+	if (dur < 0) dur += 24 * 60;
 
-	if (!paidBreak) {
-		dur -= safeNumber(breakMins, 0);
-	}
+	if (!paidBreak) dur -= safeNumber(breakMins, 0);
 	return dur;
 }
 
@@ -139,7 +150,7 @@ function minsToHours(mins) {
 function getWeekStart(dateObj) {
 	const d = new Date(dateObj);
 	const day = d.getDay(); // 0 Sun .. 6 Sat
-	const diff = (day === 0 ? -6 : 1) - day; // move to Monday
+	const diff = (day === 0 ? -6 : 1) - day;
 	d.setDate(d.getDate() + diff);
 	d.setHours(0, 0, 0, 0);
 	return d;
@@ -160,6 +171,10 @@ function isCompleted(shift) {
 	return !!(a && a.start && a.end);
 }
 
+function fmtTimeOnly(d) {
+	return d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
 // --------- Storage (Local) ----------
 function loadLocal() {
 	try {
@@ -176,7 +191,22 @@ function saveLocal() {
 	localStorage.setItem(LS_KEY, JSON.stringify(shifts));
 }
 
-// --------- Cloud storage helpers ----------
+function loadLocalJobs() {
+	try {
+		const raw = localStorage.getItem(LS_JOBS_KEY);
+		if (!raw) return [];
+		const parsed = JSON.parse(raw);
+		return Array.isArray(parsed) ? parsed : [];
+	} catch {
+		return [];
+	}
+}
+
+function saveLocalJobs() {
+	localStorage.setItem(LS_JOBS_KEY, JSON.stringify(jobs));
+}
+
+// --------- Cloud UI helpers ----------
 function setAuthMsg(msg) {
 	if (authMsgEl) authMsgEl.textContent = msg || "";
 }
@@ -190,7 +220,6 @@ function setSyncStatus(msg) {
 function setSyncing(isSyncing) {
 	if (!syncBarEl) return;
 
-	// Hide the bar entirely when signed out
 	if (!useCloud) {
 		syncBarEl.hidden = true;
 		syncBarEl.classList.remove("syncing");
@@ -205,10 +234,200 @@ function setSyncing(isSyncing) {
 	if (syncBarFillEl) syncBarFillEl.style.width = isSyncing ? "100%" : "0%";
 }
 
-function fmtTimeOnly(d) {
-	return d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+// --------- Jobs helpers ----------
+function clearJobError() {
+	if (jobErrorEl) jobErrorEl.textContent = "";
 }
 
+function setJobError(msg) {
+	if (jobErrorEl) jobErrorEl.textContent = msg || "";
+}
+
+function getJobById(id) {
+	return jobs.find(j => j.id === id) || null;
+}
+
+function ensureAtLeastOneJob() {
+	if (jobs.length > 0) return;
+
+	jobs = [{
+		id: crypto.randomUUID(),
+		createdAt: Date.now(),
+		name: "Default job",
+		defaultRate: null,
+		defaultPaidBreak: false,
+		defaultBreakMins: 0
+	}];
+}
+
+function ensureSelectedJob() {
+	if (jobs.length === 0) {
+		selectedJobId = null;
+		return;
+	}
+	if (!selectedJobId || !getJobById(selectedJobId)) {
+		selectedJobId = jobs[0].id;
+	}
+}
+
+function applyJobDefaultsToForm(job) {
+	if (!job) return;
+
+	// only fill rate if blank
+	if (hourlyRateEl && (hourlyRateEl.value == null || hourlyRateEl.value === "") && job.defaultRate != null) {
+		hourlyRateEl.value = String(job.defaultRate);
+	}
+
+	// only fill scheduled break if still 0
+	if (schedBreakEl && String(schedBreakEl.value ?? "") === "0" && Number(job.defaultBreakMins ?? 0) > 0) {
+		schedBreakEl.value = String(job.defaultBreakMins);
+	}
+
+	if (paidBreakEl) paidBreakEl.checked = !!job.defaultPaidBreak;
+}
+
+function formatJobDefaultsText(job) {
+	const bits = [];
+	if (job.defaultRate != null) bits.push(`Rate: £${Number(job.defaultRate).toFixed(2)}/hr`);
+	bits.push(`Break: ${Number(job.defaultBreakMins ?? 0)} mins`);
+	bits.push(job.defaultPaidBreak ? "Paid breaks" : "Unpaid breaks");
+	return bits.join(" • ");
+}
+
+function renderJobsUI() {
+	// Shift form job select
+	if (jobSelectEl) {
+		jobSelectEl.innerHTML = "";
+
+		const ph = document.createElement("option");
+		ph.value = "";
+		ph.disabled = true;
+		ph.selected = !selectedJobId;
+		ph.textContent = "Choose a job…";
+		jobSelectEl.appendChild(ph);
+
+		for (const j of jobs) {
+			const opt = document.createElement("option");
+			opt.value = j.id;
+			opt.textContent = j.name;
+			opt.selected = j.id === selectedJobId;
+			jobSelectEl.appendChild(opt);
+		}
+	}
+
+	// Filter select
+	if (jobFilterEl) {
+		jobFilterEl.innerHTML = "";
+
+		const allOpt = document.createElement("option");
+		allOpt.value = "all";
+		allOpt.textContent = "All jobs";
+		allOpt.selected = jobFilterId === "all";
+		jobFilterEl.appendChild(allOpt);
+
+		for (const j of jobs) {
+			const opt = document.createElement("option");
+			opt.value = j.id;
+			opt.textContent = j.name;
+			opt.selected = j.id === jobFilterId;
+			jobFilterEl.appendChild(opt);
+		}
+	}
+
+	// Jobs list
+	if (jobsListEl) {
+		jobsListEl.innerHTML = "";
+		if (jobs.length === 0) {
+			jobsListEl.textContent = "No jobs yet. Add one above.";
+			return;
+		}
+
+		for (const j of jobs) {
+			const row = document.createElement("div");
+			row.className = "jobRow";
+
+			const meta = document.createElement("div");
+			meta.className = "jobMeta";
+
+			const name = document.createElement("div");
+			name.className = "jobName";
+			name.textContent = j.name;
+
+			const defs = document.createElement("div");
+			defs.className = "jobDefaults";
+			defs.textContent = formatJobDefaultsText(j);
+
+			meta.appendChild(name);
+			meta.appendChild(defs);
+
+			const actions = document.createElement("div");
+			actions.className = "jobActions";
+
+			const editBtn = document.createElement("button");
+			editBtn.type = "button";
+			editBtn.className = "secondary";
+			editBtn.textContent = "Edit";
+			editBtn.addEventListener("click", () => startJobEdit(j.id));
+
+			const delBtn = document.createElement("button");
+			delBtn.type = "button";
+			delBtn.className = "danger secondary";
+			delBtn.textContent = "Delete";
+			delBtn.addEventListener("click", () => onDeleteJob(j.id));
+
+			actions.appendChild(editBtn);
+			actions.appendChild(delBtn);
+
+			row.appendChild(meta);
+			row.appendChild(actions);
+
+			jobsListEl.appendChild(row);
+		}
+	}
+}
+
+function resetJobForm() {
+	if (jobFormEl) jobFormEl.reset();
+	if (jobBreakMinsEl) jobBreakMinsEl.value = "0";
+	if (jobPaidBreakEl) jobPaidBreakEl.checked = false;
+	editingJobId = null;
+	if (addJobBtn) addJobBtn.textContent = "Add job";
+	if (cancelJobEditBtn) cancelJobEditBtn.hidden = true;
+	clearJobError();
+}
+
+function fillJobForm(job) {
+	if (!job) return;
+	if (jobNameEl) jobNameEl.value = job.name;
+	if (jobRateEl) jobRateEl.value = (job.defaultRate == null ? "" : String(job.defaultRate));
+	if (jobBreakMinsEl) jobBreakMinsEl.value = String(job.defaultBreakMins ?? 0);
+	if (jobPaidBreakEl) jobPaidBreakEl.checked = !!job.defaultPaidBreak;
+}
+
+function startJobEdit(id) {
+	const job = getJobById(id);
+	if (!job) return;
+
+	editingJobId = id;
+	fillJobForm(job);
+
+	if (addJobBtn) addJobBtn.textContent = "Save job";
+	if (cancelJobEditBtn) cancelJobEditBtn.hidden = false;
+	clearJobError();
+
+	const card = document.getElementById("jobsCard");
+	if (card) card.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function validateJobInput(name, rate, breakMins) {
+	const errs = [];
+	if (!name) errs.push("Enter a job name.");
+	if (breakMins < 0) errs.push("Default break can’t be negative.");
+	if (rate != null && (!Number.isFinite(rate) || rate <= 0)) errs.push("Default rate must be greater than 0.");
+	return errs;
+}
+
+// --------- Supabase row mapping ----------
 function rowToShift(r) {
 	return {
 		id: r.id,
@@ -249,6 +468,7 @@ function shiftToRow(shift, userId) {
 	};
 }
 
+// --------- Cloud shift helpers ----------
 async function cloudLoadShifts() {
 	const { data, error } = await supabaseClient
 		.from("shifts")
@@ -293,6 +513,60 @@ async function cloudDeleteShift(id) {
 	if (error) throw error;
 }
 
+// --------- Cloud jobs helpers ----------
+async function cloudLoadJobs() {
+	const { data, error } = await supabaseClient
+		.from("jobs")
+		.select("*")
+		.order("created_at", { ascending: true });
+
+	if (error) throw error;
+
+	return (data ?? []).map(r => ({
+		id: r.id,
+		createdAt: new Date(r.created_at).getTime(),
+		name: r.name,
+		defaultRate: (r.default_rate == null ? null : Number(r.default_rate)),
+		defaultPaidBreak: !!r.default_paid_break,
+		defaultBreakMins: Number(r.default_break_mins ?? 0)
+	}));
+}
+
+async function cloudInsertJob(job) {
+	const { data: u, error: uErr } = await supabaseClient.auth.getUser();
+	if (uErr) throw uErr;
+	if (!u?.user) throw new Error("Not signed in.");
+
+	const row = {
+		id: job.id,
+		user_id: u.user.id,
+		name: job.name,
+		default_rate: job.defaultRate,
+		default_paid_break: !!job.defaultPaidBreak,
+		default_break_mins: job.defaultBreakMins
+	};
+
+	const { error } = await supabaseClient.from("jobs").insert(row);
+	if (error) throw error;
+}
+
+async function cloudUpdateJob(job) {
+	const patch = {
+		name: job.name,
+		default_rate: job.defaultRate,
+		default_paid_break: !!job.defaultPaidBreak,
+		default_break_mins: job.defaultBreakMins
+	};
+
+	const { error } = await supabaseClient.from("jobs").update(patch).eq("id", job.id);
+	if (error) throw error;
+}
+
+async function cloudDeleteJob(id) {
+	const { error } = await supabaseClient.from("jobs").delete().eq("id", id);
+	if (error) throw error;
+}
+
 // --------- Sync helpers ----------
 function shiftComparableObject(s) {
 	return {
@@ -316,7 +590,6 @@ function shiftComparableObject(s) {
 }
 
 function shiftsDiffer(a, b) {
-	// Compare only the fields we actually store/sync
 	return JSON.stringify(shiftComparableObject(a)) !== JSON.stringify(shiftComparableObject(b));
 }
 
@@ -329,7 +602,6 @@ async function cloudUpsertShifts(shiftsToUpsert) {
 
 	const rows = shiftsToUpsert.map(s => shiftToRow(s, u.user.id));
 
-	// Upsert by primary key id (insert if missing, update if exists)
 	const { error } = await supabaseClient
 		.from("shifts")
 		.upsert(rows, { onConflict: "id" });
@@ -344,12 +616,11 @@ async function syncLocalToCloudOnce() {
 	syncInFlight = true;
 	setSyncing(true);
 	setSyncStatus("Cloud sync: On • Syncing…");
+
 	try {
-		// Pull cloud state
 		const cloud = await cloudLoadShifts();
 		const cloudById = new Map(cloud.map(s => [s.id, s]));
 
-		// Determine what needs uploading (missing in cloud OR differs)
 		const toUpsert = [];
 		for (const localShift of shifts) {
 			const cloudShift = cloudById.get(localShift.id);
@@ -358,15 +629,14 @@ async function syncLocalToCloudOnce() {
 			}
 		}
 
-		if (toUpsert.length) {
-			await cloudUpsertShifts(toUpsert);
-		}
+		if (toUpsert.length) await cloudUpsertShifts(toUpsert);
 
-		// Re-pull to get the canonical server state
 		const merged = await cloudLoadShifts();
 		shifts = merged;
-		saveLocal(); // keep local as offline cache
+
+		saveLocal();
 		render();
+
 		lastSyncAt = new Date();
 		setSyncStatus(`Cloud sync: On • Last synced ${fmtTimeOnly(lastSyncAt)}`);
 	} catch (e) {
@@ -379,9 +649,7 @@ async function syncLocalToCloudOnce() {
 
 function startSyncTimer() {
 	if (syncTimerId != null) return;
-	syncTimerId = setInterval(() => {
-		syncLocalToCloudOnce();
-	}, SYNC_INTERVAL_MS);
+	syncTimerId = setInterval(() => syncLocalToCloudOnce(), SYNC_INTERVAL_MS);
 }
 
 function stopSyncTimer() {
@@ -390,11 +658,18 @@ function stopSyncTimer() {
 	syncTimerId = null;
 }
 
+// --------- Auth refresh ----------
 async function refreshAuthState() {
 	if (!supabaseClient) {
 		useCloud = false;
 		setAuthMsg("Supabase not loaded — using local storage.");
 		shifts = loadLocal();
+		jobs = loadLocalJobs();
+		ensureAtLeastOneJob();
+		ensureSelectedJob();
+		saveLocalJobs();
+		renderJobsUI();
+		if (jobSelectEl) jobSelectEl.value = selectedJobId || "";
 		setSyncStatus("Cloud sync: Off");
 		setSyncing(false);
 		render();
@@ -413,10 +688,23 @@ async function refreshAuthState() {
 	if (signedIn) {
 		setAuthMsg("Signed in — using cloud sync.");
 		shifts = await cloudLoadShifts();
+		try {
+			jobs = await cloudLoadJobs();
+		} catch {
+			jobs = loadLocalJobs();
+			setAuthMsg("Signed in — shifts synced. Jobs are using local storage for now.");
+		}
 	} else {
 		setAuthMsg("Not signed in — using local storage.");
 		shifts = loadLocal();
+		jobs = loadLocalJobs();
 	}
+
+	ensureAtLeastOneJob();
+	ensureSelectedJob();
+	saveLocalJobs();
+	renderJobsUI();
+	if (jobSelectEl) jobSelectEl.value = selectedJobId || "";
 
 	if (signedIn) startSyncTimer();
 	else stopSyncTimer();
@@ -427,6 +715,8 @@ async function refreshAuthState() {
 // --------- Validation ----------
 function validateShiftInput(input) {
 	const errors = [];
+
+	if (!selectedJobId) errors.push("Choose a job.");
 
 	if (!input.dateWorked) errors.push("Pick a date.");
 	if (!input.schedStart || !input.schedEnd) errors.push("Scheduled start and end are required.");
@@ -440,11 +730,9 @@ function validateShiftInput(input) {
 	if (hasActualStart !== hasActualEnd) errors.push("If you enter actual start, you must enter actual end (and vice-versa).");
 	if (safeNumber(input.actBreakMins ?? 0, 0) < 0) errors.push("Actual break can’t be negative.");
 
-	// sanity check: scheduled minutes after break > 0
 	const schedMins = minsWorked(input.schedStart, input.schedEnd, input.schedBreakMins, input.paidBreak);
 	if (schedMins != null && schedMins <= 0) errors.push("Scheduled hours look invalid (break may be too long).");
 
-	// sanity check: actual minutes after break > 0 (only if provided)
 	if (hasActualStart && hasActualEnd) {
 		const actMins = minsWorked(input.actStart, input.actEnd, input.actBreakMins ?? 0, input.paidBreak);
 		if (actMins != null && actMins <= 0) errors.push("Actual hours look invalid (break may be too long).");
@@ -470,13 +758,7 @@ function calcForShift(shift) {
 		actPay = actHours * rate;
 	}
 
-	return {
-		schedHours,
-		schedPay,
-		actHours,
-		actPay,
-		diffPay: actPay - schedPay
-	};
+	return { schedHours, schedPay, actHours, actPay, diffPay: actPay - schedPay };
 }
 
 function buildWeeklySummaries(shiftsArr) {
@@ -488,8 +770,8 @@ function buildWeeklySummaries(shiftsArr) {
 		const weekId = dateKey(weekStart);
 
 		if (!map.has(weekId)) {
-			const weekEnd = addDays(weekStart, 6); // Sunday
-			const payDate = addDays(weekEnd, 5);   // Friday following week
+			const weekEnd = addDays(weekStart, 6);
+			const payDate = addDays(weekEnd, 5);
 			map.set(weekId, {
 				weekStart,
 				weekEnd,
@@ -513,13 +795,14 @@ function buildWeeklySummaries(shiftsArr) {
 		if (isCompleted(s)) w.completedCount += 1;
 	}
 
-	// sort newest first by weekStart
 	return Array.from(map.values()).sort((a, b) => b.weekStart - a.weekStart);
 }
 
 // --------- Rendering ----------
 function render() {
-	const sorted = shifts.slice().sort((a, b) => {
+	const filtered = (jobFilterId === "all") ? shifts : shifts.filter(s => s.jobId === jobFilterId);
+
+	const sorted = filtered.slice().sort((a, b) => {
 		if (a.dateWorked === b.dateWorked) return (b.createdAt ?? 0) - (a.createdAt ?? 0);
 		return b.dateWorked.localeCompare(a.dateWorked);
 	});
@@ -533,7 +816,6 @@ function renderShiftsTable(sorted) {
 
 	for (const s of sorted) {
 		const c = calcForShift(s);
-
 		const tr = document.createElement("tr");
 
 		const dateTd = document.createElement("td");
@@ -625,15 +907,10 @@ function renderWeekly(weeks) {
 		title.textContent = `${fmtDateLong(w.weekStart)} – ${fmtDateLong(w.weekEnd)}`;
 		card.appendChild(title);
 
-		const k1 = kvRow("Scheduled", `${fmtHours(w.schedHours)} hrs • ${fmtMoney(w.schedPay)}`);
-		const k2 = kvRow("Actual", `${fmtHours(w.actHours)} hrs • ${fmtMoney(w.actPay)}`);
-		const diff = kvRow("Difference", `${fmtMoney(w.actPay - w.schedPay)}`);
-		const pay = kvRow("Pay date", `${fmtDateLong(w.payDate)}`);
-
-		card.appendChild(k1);
-		card.appendChild(k2);
-		card.appendChild(diff);
-		card.appendChild(pay);
+		card.appendChild(kvRow("Scheduled", `${fmtHours(w.schedHours)} hrs • ${fmtMoney(w.schedPay)}`));
+		card.appendChild(kvRow("Actual", `${fmtHours(w.actHours)} hrs • ${fmtMoney(w.actPay)}`));
+		card.appendChild(kvRow("Difference", `${fmtMoney(w.actPay - w.schedPay)}`));
+		card.appendChild(kvRow("Pay date", `${fmtDateLong(w.payDate)}`));
 
 		const pills = document.createElement("div");
 		pills.className = "pillRow";
@@ -650,7 +927,6 @@ function renderWeekly(weeks) {
 		pills.appendChild(p2);
 
 		card.appendChild(pills);
-
 		weeksWrap.appendChild(card);
 	}
 }
@@ -688,13 +964,8 @@ function getFormInput() {
 	};
 }
 
-function clearError() {
-	formErrorEl.textContent = "";
-}
-
-function setError(msg) {
-	formErrorEl.textContent = msg;
-}
+function clearError() { formErrorEl.textContent = ""; }
+function setError(msg) { formErrorEl.textContent = msg; }
 
 function resetForm() {
 	form.reset();
@@ -704,10 +975,16 @@ function resetForm() {
 	editingId = null;
 	submitBtn.textContent = "Add shift";
 	cancelEditBtn.hidden = true;
+
+	if (jobSelectEl) jobSelectEl.value = selectedJobId || "";
+
 	clearError();
 }
 
 function fillFormFromShift(shift) {
+	selectedJobId = shift.jobId ?? selectedJobId;
+	if (jobSelectEl) jobSelectEl.value = selectedJobId || "";
+
 	dateWorkedEl.value = shift.dateWorked;
 	hourlyRateEl.value = shift.rate;
 	notesEl.value = shift.notes ?? "";
@@ -732,20 +1009,10 @@ async function addShiftFromInput(input) {
 		rate: input.rate,
 		notes: input.notes,
 		paidBreak: !!input.paidBreak,
-		sched: {
-			start: input.schedStart,
-			end: input.schedEnd,
-			breakMins: input.schedBreakMins
-		},
-		actual: (input.actStart && input.actEnd) ? {
-			start: input.actStart,
-			end: input.actEnd,
-			breakMins: input.actBreakMins
-		} : {
-			start: "",
-			end: "",
-			breakMins: input.actBreakMins
-		}
+		sched: { start: input.schedStart, end: input.schedEnd, breakMins: input.schedBreakMins },
+		actual: (input.actStart && input.actEnd)
+			? { start: input.actStart, end: input.actEnd, breakMins: input.actBreakMins }
+			: { start: "", end: "", breakMins: input.actBreakMins }
 	};
 
 	shifts.push(shift);
@@ -772,24 +1039,15 @@ async function updateShiftFromInput(id, input) {
 
 	const updated = {
 		...shifts[idx],
+		jobId: selectedJobId,
 		dateWorked: input.dateWorked,
 		rate: input.rate,
 		notes: input.notes,
 		paidBreak: !!input.paidBreak,
-		sched: {
-			start: input.schedStart,
-			end: input.schedEnd,
-			breakMins: input.schedBreakMins
-		},
-		actual: (input.actStart && input.actEnd) ? {
-			start: input.actStart,
-			end: input.actEnd,
-			breakMins: input.actBreakMins
-		} : {
-			start: "",
-			end: "",
-			breakMins: input.actBreakMins
-		}
+		sched: { start: input.schedStart, end: input.schedEnd, breakMins: input.schedBreakMins },
+		actual: (input.actStart && input.actEnd)
+			? { start: input.actStart, end: input.actEnd, breakMins: input.actBreakMins }
+			: { start: "", end: "", breakMins: input.actBreakMins }
 	};
 
 	shifts[idx] = updated;
@@ -849,6 +1107,122 @@ async function onDelete(id) {
 	if (editingId === id) resetForm();
 }
 
+// --------- Jobs actions ----------
+async function upsertJobFromForm() {
+	clearJobError();
+
+	const name = (jobNameEl?.value || "").trim();
+	const rateRaw = (jobRateEl?.value || "").trim();
+	const rate = rateRaw === "" ? null : safeNumber(rateRaw, NaN);
+	const breakMins = safeNumber(jobBreakMinsEl?.value ?? 0, 0);
+	const paid = !!jobPaidBreakEl?.checked;
+
+	const errs = validateJobInput(name, rate, breakMins);
+	if (errs.length) {
+		setJobError(errs[0]);
+		return;
+	}
+
+	if (editingJobId) {
+		const idx = jobs.findIndex(j => j.id === editingJobId);
+		if (idx === -1) return;
+
+		const updated = {
+			...jobs[idx],
+			name,
+			defaultRate: rate,
+			defaultBreakMins: breakMins,
+			defaultPaidBreak: paid
+		};
+
+		jobs[idx] = updated;
+
+		try {
+			if (useCloud) {
+				await cloudUpdateJob(updated);
+				jobs = await cloudLoadJobs();
+			}
+			saveLocalJobs();
+			ensureAtLeastOneJob();
+			ensureSelectedJob();
+			renderJobsUI();
+			if (jobSelectEl) jobSelectEl.value = selectedJobId || "";
+			resetJobForm();
+			return;
+		} catch (e) {
+			setJobError(e?.message ?? "Save job failed.");
+			saveLocalJobs();
+			renderJobsUI();
+			return;
+		}
+	}
+
+	const job = {
+		id: crypto.randomUUID(),
+		createdAt: Date.now(),
+		name,
+		defaultRate: rate,
+		defaultPaidBreak: paid,
+		defaultBreakMins: breakMins
+	};
+
+	jobs.push(job);
+
+	try {
+		if (useCloud) {
+			await cloudInsertJob(job);
+			jobs = await cloudLoadJobs();
+		}
+		saveLocalJobs();
+		ensureAtLeastOneJob();
+		ensureSelectedJob();
+		renderJobsUI();
+		if (jobSelectEl) jobSelectEl.value = selectedJobId || "";
+		resetJobForm();
+	} catch (e) {
+		setJobError(e?.message ?? "Add job failed.");
+		saveLocalJobs();
+		renderJobsUI();
+	}
+}
+
+async function onDeleteJob(id) {
+	const job = getJobById(id);
+	if (!job) return;
+
+	const ok = confirm(`Delete job “${job.name}”? Shifts will remain, but may become unassigned.`);
+	if (!ok) return;
+
+	jobs = jobs.filter(j => j.id !== id);
+	shifts = shifts.map(s => (s.jobId === id ? { ...s, jobId: null } : s));
+
+	if (selectedJobId === id) selectedJobId = null;
+	if (jobFilterId === id) jobFilterId = "all";
+
+	try {
+		if (useCloud) {
+			await cloudDeleteJob(id);
+			jobs = await cloudLoadJobs();
+			shifts = await cloudLoadShifts();
+		}
+		saveLocalJobs();
+		saveLocal();
+
+		ensureAtLeastOneJob();
+		ensureSelectedJob();
+		renderJobsUI();
+		if (jobSelectEl) jobSelectEl.value = selectedJobId || "";
+		render();
+		resetJobForm();
+	} catch (e) {
+		setJobError(e?.message ?? "Delete job failed.");
+		saveLocalJobs();
+		saveLocal();
+		renderJobsUI();
+		render();
+	}
+}
+
 // --------- Export / Import ----------
 function downloadText(filename, text) {
 	const blob = new Blob([text], { type: "application/json" });
@@ -866,6 +1240,7 @@ function exportJSON() {
 	const payload = {
 		version: 1,
 		exportedAt: new Date().toISOString(),
+		jobs,
 		shifts
 	};
 	downloadText(
@@ -878,10 +1253,25 @@ async function importJSONFile(file) {
 	const text = await file.text();
 	const parsed = JSON.parse(text);
 
-	const incoming = Array.isArray(parsed) ? parsed : parsed.shifts;
-	if (!Array.isArray(incoming)) throw new Error("Invalid JSON format.");
+	const incomingShifts = Array.isArray(parsed) ? parsed : parsed.shifts;
+	const incomingJobs = (parsed && typeof parsed === "object") ? parsed.jobs : null;
 
-	const cleaned = incoming
+	if (!Array.isArray(incomingShifts)) throw new Error("Invalid JSON format.");
+
+	if (Array.isArray(incomingJobs)) {
+		jobs = incomingJobs
+			.filter(j => j && typeof j === "object" && typeof j.id === "string" && typeof j.name === "string")
+			.map(j => ({
+				id: j.id,
+				createdAt: j.createdAt ?? Date.now(),
+				name: j.name,
+				defaultRate: (j.defaultRate == null ? null : safeNumber(j.defaultRate, null)),
+				defaultPaidBreak: !!j.defaultPaidBreak,
+				defaultBreakMins: safeNumber(j.defaultBreakMins ?? 0, 0)
+			}));
+	}
+
+	const cleaned = incomingShifts
 		.filter(s => s && typeof s === "object" && typeof s.id === "string" && typeof s.dateWorked === "string")
 		.map(s => ({
 			id: s.id,
@@ -904,14 +1294,20 @@ async function importJSONFile(file) {
 		}));
 
 	shifts = cleaned;
+
+	ensureAtLeastOneJob();
+	ensureSelectedJob();
+
+	saveLocalJobs();
 	saveLocal();
+
+	renderJobsUI();
+	if (jobSelectEl) jobSelectEl.value = selectedJobId || "";
 	render();
 	resetForm();
+	resetJobForm();
 
-	// If signed in, upload imported data to your account automatically
-	if (useCloud) {
-		await syncLocalToCloudOnce();
-	}
+	if (useCloud) await syncLocalToCloudOnce();
 }
 
 // --------- Events ----------
@@ -955,7 +1351,36 @@ importInput.addEventListener("change", async (e) => {
 	}
 });
 
-// --------- Auth events ----------
+// Jobs events
+if (jobSelectEl) {
+	jobSelectEl.addEventListener("change", () => {
+		selectedJobId = jobSelectEl.value || null;
+		const job = getJobById(selectedJobId);
+		applyJobDefaultsToForm(job);
+		saveLocalJobs();
+	});
+}
+
+if (jobFilterEl) {
+	jobFilterEl.addEventListener("change", () => {
+		jobFilterId = jobFilterEl.value || "all";
+		saveLocalJobs();
+		render();
+	});
+}
+
+if (jobFormEl) {
+	jobFormEl.addEventListener("submit", async (e) => {
+		e.preventDefault();
+		await upsertJobFromForm();
+	});
+}
+
+if (cancelJobEditBtn) {
+	cancelJobEditBtn.addEventListener("click", () => resetJobForm());
+}
+
+// Auth events
 if (signUpBtn) {
 	signUpBtn.addEventListener("click", async () => {
 		clearError();
@@ -1019,6 +1444,14 @@ if (signOutBtn) {
 
 // --------- Init ----------
 async function init() {
+	// offline-first jobs
+	jobs = loadLocalJobs();
+	ensureAtLeastOneJob();
+	ensureSelectedJob();
+	saveLocalJobs();
+	renderJobsUI();
+	if (jobSelectEl) jobSelectEl.value = selectedJobId || "";
+
 	await refreshAuthState();
 }
 init();
