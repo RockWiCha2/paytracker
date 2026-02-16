@@ -13,7 +13,7 @@ const LS_KEY = "paytracker_shifts_v1";
 const SUPABASE_URL = "https://ephskckdgmisocwjzond.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_LcauD3kUOZiQcJoTVfUK6A_aZwDs89q";
 
-const supabase = window.supabase?.createClient
+const supabaseClient = window.supabase?.createClient
 	? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
 	: null;
 
@@ -204,7 +204,7 @@ function shiftToRow(shift, userId) {
 }
 
 async function cloudLoadShifts() {
-	const { data, error } = await supabase
+	const { data, error } = await supabaseClient
 		.from("shifts")
 		.select("*")
 		.order("date_worked", { ascending: false })
@@ -215,11 +215,11 @@ async function cloudLoadShifts() {
 }
 
 async function cloudInsertShift(shift) {
-	const { data: u, error: uErr } = await supabase.auth.getUser();
+	const { data: u, error: uErr } = await supabaseClient.auth.getUser();
 	if (uErr) throw uErr;
 	if (!u?.user) throw new Error("Not signed in.");
 
-	const { error } = await supabase.from("shifts").insert(shiftToRow(shift, u.user.id));
+	const { error } = await supabaseClient.from("shifts").insert(shiftToRow(shift, u.user.id));
 	if (error) throw error;
 }
 
@@ -237,17 +237,17 @@ async function cloudUpdateShift(shift) {
 		act_break_mins: shift.actual?.breakMins ?? 0
 	};
 
-	const { error } = await supabase.from("shifts").update(patch).eq("id", shift.id);
+	const { error } = await supabaseClient.from("shifts").update(patch).eq("id", shift.id);
 	if (error) throw error;
 }
 
 async function cloudDeleteShift(id) {
-	const { error } = await supabase.from("shifts").delete().eq("id", id);
+	const { error } = await supabaseClient.from("shifts").delete().eq("id", id);
 	if (error) throw error;
 }
 
 async function refreshAuthState() {
-	if (!supabase) {
+	if (!supabaseClient) {
 		useCloud = false;
 		setAuthMsg("Supabase not loaded — using local storage.");
 		shifts = loadLocal();
@@ -255,7 +255,7 @@ async function refreshAuthState() {
 		return;
 	}
 
-	const { data } = await supabase.auth.getSession();
+	const { data } = await supabaseClient.auth.getSession();
 	const signedIn = !!data.session;
 
 	useCloud = signedIn;
@@ -809,12 +809,12 @@ if (signUpBtn && signInBtn && signOutBtn) {
 			setAuthMsg("Enter an email and password.");
 			return;
 		}
-		if (!supabase) {
+		if (!supabaseClient) {
 			setAuthMsg("Supabase not loaded.");
 			return;
 		}
 
-		const { error } = await supabase.auth.signUp({ email, password });
+		const { error } = await supabaseClient.auth.signUp({ email, password });
 		setAuthMsg(error ? error.message : "Account created. Now sign in.");
 	});
 
@@ -829,12 +829,12 @@ if (signUpBtn && signInBtn && signOutBtn) {
 			setAuthMsg("Enter an email and password.");
 			return;
 		}
-		if (!supabase) {
+		if (!supabaseClient) {
 			setAuthMsg("Supabase not loaded.");
 			return;
 		}
 
-		const { error } = await supabase.auth.signInWithPassword({ email, password });
+		const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
 		if (error) {
 			setAuthMsg(error.message);
 			return;
@@ -845,8 +845,8 @@ if (signUpBtn && signInBtn && signOutBtn) {
 
 	signOutBtn.addEventListener("click", async () => {
 		clearError();
-		if (!supabase) return;
-		await supabase.auth.signOut();
+		if (!supabaseClient) return;
+		await supabaseClient.auth.signOut();
 		await refreshAuthState();
 	});
 }
