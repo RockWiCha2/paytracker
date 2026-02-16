@@ -65,6 +65,10 @@ const signInBtn = document.getElementById("signInBtn");
 const signOutBtn = document.getElementById("signOutBtn");
 const authMsgEl = document.getElementById("authMsg");
 
+const syncStatusEl = document.getElementById("syncStatus");
+const syncBarEl = document.getElementById("syncBar");
+const syncBarFillEl = document.getElementById("syncBarFill");
+
 // --------- Utils ----------
 function safeNumber(v, fallback = 0) {
 	const n = Number(v);
@@ -169,6 +173,34 @@ function saveLocal() {
 // --------- Cloud storage helpers ----------
 function setAuthMsg(msg) {
 	if (authMsgEl) authMsgEl.textContent = msg || "";
+}
+
+let lastSyncAt = null;
+
+function setSyncStatus(msg) {
+	if (syncStatusEl) syncStatusEl.textContent = msg || "";
+}
+
+function setSyncing(isSyncing) {
+	if (!syncBarEl) return;
+
+	// Hide the bar entirely when signed out
+	if (!useCloud) {
+		syncBarEl.hidden = true;
+		syncBarEl.classList.remove("syncing");
+		if (syncBarFillEl) syncBarFillEl.style.width = "0%";
+		return;
+	}
+
+	syncBarEl.hidden = false;
+	if (isSyncing) syncBarEl.classList.add("syncing");
+	else syncBarEl.classList.remove("syncing");
+
+	if (syncBarFillEl) syncBarFillEl.style.width = isSyncing ? "100%" : "0%";
+}
+
+function fmtTimeOnly(d) {
+	return d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
 function rowToShift(r) {
@@ -300,6 +332,8 @@ async function syncLocalToCloudOnce() {
 	if (syncInFlight) return;
 
 	syncInFlight = true;
+	setSyncing(true);
+	setSyncStatus("Cloud sync: On • Syncing…");
 	try {
 		// Pull cloud state
 		const cloud = await cloudLoadShifts();
@@ -323,10 +357,12 @@ async function syncLocalToCloudOnce() {
 		shifts = merged;
 		saveLocal(); // keep local as offline cache
 		render();
+		lastSyncAt = new Date();
+		setSyncStatus(`Cloud sync: On • Last synced ${fmtTimeOnly(lastSyncAt)}`);
 	} catch (e) {
-		// Don’t spam errors into the form field; keep it quiet unless you want to surface it
-		// console.warn("Sync failed:", e);
+		setSyncStatus(`Cloud sync: On • Sync failed (${e?.message ?? "error"})`);
 	} finally {
+		setSyncing(false);
 		syncInFlight = false;
 	}
 }
@@ -349,6 +385,8 @@ async function refreshAuthState() {
 		useCloud = false;
 		setAuthMsg("Supabase not loaded — using local storage.");
 		shifts = loadLocal();
+		setSyncStatus("Cloud sync: Off");
+		setSyncing(false);
 		render();
 		stopSyncTimer();
 		return;
@@ -359,6 +397,8 @@ async function refreshAuthState() {
 
 	useCloud = signedIn;
 	if (signOutBtn) signOutBtn.hidden = !signedIn;
+	setSyncStatus(signedIn ? "Cloud sync: On" : "Cloud sync: Off");
+	setSyncing(false);
 
 	if (signedIn) {
 		setAuthMsg("Signed in — using cloud sync.");
@@ -904,7 +944,7 @@ importInput.addEventListener("change", async (e) => {
 });
 
 // --------- Auth events ----------
-if (signUpBtn && signInBtn && signOutBtn) {
+if (signUpBtn) {
 	signUpBtn.addEventListener("click", async () => {
 		clearError();
 		setAuthMsg("Signing up…");
@@ -924,7 +964,9 @@ if (signUpBtn && signInBtn && signOutBtn) {
 		const { error } = await supabaseClient.auth.signUp({ email, password });
 		setAuthMsg(error ? error.message : "Account created. Now sign in.");
 	});
+}
 
+if (signInBtn) {
 	signInBtn.addEventListener("click", async () => {
 		clearError();
 		setAuthMsg("Signing in…");
@@ -950,12 +992,16 @@ if (signUpBtn && signInBtn && signOutBtn) {
 		await refreshAuthState();
 		await syncLocalToCloudOnce();
 	});
+}
 
+if (signOutBtn) {
 	signOutBtn.addEventListener("click", async () => {
 		clearError();
 		if (!supabaseClient) return;
 		await supabaseClient.auth.signOut();
 		await refreshAuthState();
+		setSyncing(false);
+		setSyncStatus("Cloud sync: Off");
 	});
 }
 

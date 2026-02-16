@@ -37,7 +37,12 @@
 			</div>
 
 			<p id="authMsg" class="muted small" aria-live="polite"></p>
+			<p id="syncStatus" class="muted small" aria-live="polite"></p>
+			<div id="syncBar" class="syncBar" hidden>
+				<div id="syncBarFill" class="syncBarFill"></div>
+			</div>
 		</section>
+
 		<!-- FORM -->
 		<section class="card">
 			<h2>Add / Edit shift</h2>
@@ -157,9 +162,10 @@
 	</main>
 
 	<footer class="container muted small">
-		<p>Data is stored locally in your browser unless you later enable cloud sync.</p>
+		<p>Data is stored locally when signed out, and synced to your cloud account when signed in.</p>
 	</footer>
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-    <script src="app.js"></script>
+
+	<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+	<script src="app.js"></script>
 </body>
 </html>
