@@ -17,7 +17,13 @@ const supabaseClient = window.supabase?.createClient
 	? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
 	: null;
 
+
 let useCloud = false;
+
+// --------- Sync settings ----------
+const SYNC_INTERVAL_MS = 10000; // every 10s
+let syncTimerId = null;
+let syncInFlight = false;
 
 let shifts = [];
 let editingId = null;
@@ -246,12 +252,105 @@ async function cloudDeleteShift(id) {
 	if (error) throw error;
 }
 
+// --------- Sync helpers ----------
+function shiftComparableObject(s) {
+	return {
+		id: s.id,
+		dateWorked: s.dateWorked,
+		rate: Number(s.rate),
+		notes: s.notes ?? "",
+		paidBreak: !!s.paidBreak,
+		sched: {
+			start: s.sched?.start ?? "",
+			end: s.sched?.end ?? "",
+			breakMins: Number(s.sched?.breakMins ?? 0)
+		},
+		actual: {
+			start: s.actual?.start ?? "",
+			end: s.actual?.end ?? "",
+			breakMins: Number(s.actual?.breakMins ?? 0)
+		}
+	};
+}
+
+function shiftsDiffer(a, b) {
+	// Compare only the fields we actually store/sync
+	return JSON.stringify(shiftComparableObject(a)) !== JSON.stringify(shiftComparableObject(b));
+}
+
+async function cloudUpsertShifts(shiftsToUpsert) {
+	if (!shiftsToUpsert.length) return;
+
+	const { data: u, error: uErr } = await supabaseClient.auth.getUser();
+	if (uErr) throw uErr;
+	if (!u?.user) throw new Error("Not signed in.");
+
+	const rows = shiftsToUpsert.map(s => shiftToRow(s, u.user.id));
+
+	// Upsert by primary key id (insert if missing, update if exists)
+	const { error } = await supabaseClient
+		.from("shifts")
+		.upsert(rows, { onConflict: "id" });
+
+	if (error) throw error;
+}
+
+async function syncLocalToCloudOnce() {
+	if (!useCloud || !supabaseClient) return;
+	if (syncInFlight) return;
+
+	syncInFlight = true;
+	try {
+		// Pull cloud state
+		const cloud = await cloudLoadShifts();
+		const cloudById = new Map(cloud.map(s => [s.id, s]));
+
+		// Determine what needs uploading (missing in cloud OR differs)
+		const toUpsert = [];
+		for (const localShift of shifts) {
+			const cloudShift = cloudById.get(localShift.id);
+			if (!cloudShift || shiftsDiffer(localShift, cloudShift)) {
+				toUpsert.push(localShift);
+			}
+		}
+
+		if (toUpsert.length) {
+			await cloudUpsertShifts(toUpsert);
+		}
+
+		// Re-pull to get the canonical server state
+		const merged = await cloudLoadShifts();
+		shifts = merged;
+		saveLocal(); // keep local as offline cache
+		render();
+	} catch (e) {
+		// Don’t spam errors into the form field; keep it quiet unless you want to surface it
+		// console.warn("Sync failed:", e);
+	} finally {
+		syncInFlight = false;
+	}
+}
+
+function startSyncTimer() {
+	if (syncTimerId != null) return;
+	syncTimerId = setInterval(() => {
+		syncLocalToCloudOnce();
+	}, SYNC_INTERVAL_MS);
+}
+
+function stopSyncTimer() {
+	if (syncTimerId == null) return;
+	clearInterval(syncTimerId);
+	syncTimerId = null;
+}
+
 async function refreshAuthState() {
 	if (!supabaseClient) {
 		useCloud = false;
 		setAuthMsg("Supabase not loaded — using local storage.");
 		shifts = loadLocal();
 		render();
+		stopSyncTimer();
 		return;
 	}
 
@@ -268,6 +367,9 @@ async function refreshAuthState() {
 		setAuthMsg("Not signed in — using local storage.");
 		shifts = loadLocal();
 	}
+
+	if (signedIn) startSyncTimer();
+	else stopSyncTimer();
 
 	render();
 }
@@ -753,6 +855,11 @@ async function importJSONFile(file) {
 	saveLocal();
 	render();
 	resetForm();
+
+	// If signed in, upload imported data to your account automatically
+	if (useCloud) {
+		await syncLocalToCloudOnce();
+	}
 }
 
 // --------- Events ----------
@@ -841,6 +948,7 @@ if (signUpBtn && signInBtn && signOutBtn) {
 		}
 
 		await refreshAuthState();
+		await syncLocalToCloudOnce();
 	});
 
 	signOutBtn.addEventListener("click", async () => {
